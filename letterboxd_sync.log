@@ -1,0 +1,12 @@
+Configuration:
+  Email: arda.cildan@gmail.com
+  List: MUBI all Movies TR
+  CSV: mubifinder_turkey_available.csv
+  Headless: False
+Loaded 836 movies from mubifinder_turkey_available.csv
+
+[1/5] Logging in to Letterboxd...
+  [!] Auto login did not complete.
+  Complete sign-in in the browser window (including any Cloudflare check).
+  Waiting up to 3 minutes...
+  [!] Login timed out. Check LETTERBOXD_EMAIL and LETTERBOXD_PASSWORD in .env

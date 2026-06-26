@@ -2,8 +2,14 @@
 """
 Sync mubifinder_turkey_available.csv to a Letterboxd list.
 
-Reads the CSV directly (does not run the Mubi scraper).
-Requires: pip install python-dotenv playwright && playwright install chromium
+HOW TO RUN:
+1. Kill Chrome and relaunch with remote debugging:
+   pkill -x "Google Chrome" && sleep 2
+   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+     --remote-debugging-port=9222 \
+     --user-data-dir="/Users/ardacildan/ChromeDebug" &
+2. Log into Letterboxd in that Chrome window.
+3. Run: python3 letterboxd_sync.py
 """
 
 import csv
@@ -21,14 +27,11 @@ from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
-EMAIL = os.getenv("LETTERBOXD_EMAIL")
-PASSWORD = os.getenv("LETTERBOXD_PASSWORD")
 USERNAME = os.getenv("LETTERBOXD_USERNAME")
 LIST_NAME = os.getenv("LETTERBOXD_LIST_NAME", "MUBI all Movies TR")
 CSV_FILE = os.getenv("LETTERBOXD_CSV_FILE", "mubifinder_turkey_available.csv")
-HEADLESS = os.getenv("LETTERBOXD_HEADLESS", "false").lower() in {"1", "true", "yes"}
 REQUEST_DELAY = float(os.getenv("LETTERBOXD_DELAY_SECONDS", "1.0"))
-STORAGE_STATE = os.getenv("LETTERBOXD_STORAGE_STATE", ".letterboxd_auth.json")
+CDP_URL = os.getenv("LETTERBOXD_CDP_URL", "http://localhost:9222")
 
 BASE_URL = "https://letterboxd.com"
 
@@ -81,10 +84,20 @@ def pause(seconds: float | None = None) -> None:
     time.sleep(seconds if seconds is not None else REQUEST_DELAY)
 
 
-def is_logged_in(page) -> bool:
-    page.goto(f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded")
-    pause(0.3)
-    return page.locator("a[href*='sign-out']").count() > 0
+def check_logged_in_on_page(page) -> bool:
+    try:
+        return page.locator("a:has-text('Sign Out'), a[href*='sign-out']").count() > 0
+    except Exception:
+        return False
+
+
+def navigate_and_check_logged_in(page) -> bool:
+    try:
+        page.goto(f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded")
+        pause(1)
+        return page.locator("a:has-text('Sign Out'), a[href*='sign-out']").count() > 0
+    except Exception:
+        return False
 
 
 def get_username(page) -> str | None:
@@ -94,70 +107,48 @@ def get_username(page) -> str | None:
     page.goto(f"{BASE_URL}/settings/", timeout=60_000, wait_until="domcontentloaded")
     pause(0.3)
 
-    for selector in ("input[name='login']", "input#login", "input[name='username']"):
-        field = page.locator(selector).first
-        if field.count() == 0:
-            continue
-        value = field.input_value().strip()
-        if value:
-            return value
-
-    profile_link = page.locator("a[href*='sign-out']").locator(
-        "xpath=ancestor::header//a[starts-with(@href, '/') and not(contains(@href, 'sign'))][1]"
-    ).first
-    if profile_link.count() > 0:
-        href = profile_link.get_attribute("href") or ""
-        parts = href.strip("/").split("/")
-        if len(parts) == 1 and parts[0]:
-            return parts[0]
+    try:
+        nav_links = page.locator("header a[href^='/']").all()
+        for link in nav_links:
+            href = link.get_attribute("href") or ""
+            parts = href.strip("/").split("/")
+            if len(parts) == 1 and parts[0] and parts[0] not in (
+                "films", "lists", "members", "journal", "signin",
+                "sign-in", "sign-out", "settings", "search", "pro"
+            ):
+                return parts[0]
+    except Exception:
+        pass
 
     return None
 
 
-def save_session(context) -> None:
-    context.storage_state(path=STORAGE_STATE)
-    print(f"  [ok] Saved session to {STORAGE_STATE}")
+def letterboxd_login(page) -> bool:
+    print("\n[1/5] Checking Letterboxd login...")
 
+    if check_logged_in_on_page(page):
+        print("  [ok] Already logged in (detected on current page)")
+        return True
 
-def letterboxd_login(page, context, email: str, password: str) -> bool:
-    print("\n[1/5] Logging in to Letterboxd...")
-
-    if is_logged_in(page):
+    print("  Navigating to letterboxd.com to check login status...")
+    if navigate_and_check_logged_in(page):
         print("  [ok] Already logged in")
         return True
 
-    page.goto(f"{BASE_URL}/sign-in/", timeout=120_000, wait_until="domcontentloaded")
-    pause(0.5)
-    page.locator("#field-username").fill(email)
-    page.locator("#field-password").fill(password)
-    page.locator("form button.standalone-flow-button").click()
+    print("  [!] Not logged in.")
+    print("      Please log into Letterboxd in the Chrome window.")
+    print("      Complete any Cloudflare check first, then sign in.")
+    print("  Waiting up to 10 minutes for you to log in...")
 
-    for _ in range(30):
-        pause(1)
-        if is_logged_in(page):
-            print("  [ok] Logged in")
-            save_session(context)
-            return True
-
-    if HEADLESS:
-        print("  [!] Login failed. Letterboxd often blocks headless browsers.")
-        print("      Set LETTERBOXD_HEADLESS=false and run again, or sign in manually once.")
-        return False
-
-    print("  [!] Auto login did not complete.")
-    print("  A Chromium window should be open. Sign in there (including any Cloudflare check).")
-    page.goto(f"{BASE_URL}/sign-in/", timeout=120_000, wait_until="domcontentloaded")
-    print("  Waiting up to 10 minutes for manual sign-in...")
     for second in range(600):
-        if second > 0 and second % 30 == 0:
+        if second > 0 and second % 15 == 0:
             print(f"  ...still waiting ({second // 60}m {second % 60}s)")
         pause(1)
-        if is_logged_in(page):
-            print("  [ok] Logged in manually")
-            save_session(context)
+        if check_logged_in_on_page(page):
+            print("  [ok] Logged in!")
             return True
 
-    print("  [!] Login timed out. Check LETTERBOXD_EMAIL and LETTERBOXD_PASSWORD in .env")
+    print("  [!] Login timed out.")
     return False
 
 
@@ -180,40 +171,158 @@ def find_list(page, username: str, list_name: str) -> str | None:
     return None
 
 
-def create_list_with_film(page, film_slug: str, list_name: str) -> bool:
-    print(f"  [*] Creating list '{list_name}' with first matched film...")
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="domcontentloaded")
-    pause(0.5)
+def open_list_selection_modal(page) -> bool:
+    """Click the menu button then 'Add to lists' to open the list-selection panel."""
+    # First click the dropdown arrow next to LOG button
+    menu_btn = page.locator("button.button-add-menu").first
+    if menu_btn.count() > 0:
+        try:
+            menu_btn.click(timeout=5_000)
+            pause(0.5)
+        except PlaywrightTimeoutError:
+            pass
 
-    if not open_list_modal(page):
-        print("  [!] Could not open Lists modal on film page")
-        return False
+    # Now click 'Add to lists...'
+    add_btn = page.locator("button:has-text('Add to lists')").first
+    if add_btn.count() > 0:
+        try:
+            add_btn.click(timeout=5_000)
+            pause(0.8)
+            # Confirm the list-selection panel opened
+            if page.locator("div.list-selection").count() > 0:
+                return True
+        except PlaywrightTimeoutError:
+            pass
 
-    modal = page.locator(".modal, .overlay, [role='dialog']").last
-    new_list_button = modal.locator("a:has-text('New list'), button:has-text('New list')").first
-    if new_list_button.count() == 0:
-        page.keyboard.press("Escape")
-        print("  [!] Could not find 'New list' button in modal")
-        return False
+    return False
 
-    new_list_button.click()
-    pause(0.5)
 
-    name_input = page.locator(
-        "input[name='name'], input[placeholder*='List'], input[placeholder*='list']"
-    ).last
-    name_input.wait_for(state="visible", timeout=10_000)
-    name_input.fill(list_name)
+def create_list(page, film_slug: str, list_name: str) -> bool:
+    """Navigate to a film, open the list modal, click 'New list...' and create it."""
+    print(f"  [*] Creating list '{list_name}'...")
+    page.goto("about:blank")
     pause(0.3)
+    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    pause(1)
 
-    save_button = page.locator(
-        "button:has-text('Save'), button:has-text('Create'), button:has-text('Add')"
-    ).last
-    save_button.click()
-    pause(0.5)
+    if not open_list_selection_modal(page):
+        print("  [!] Could not open list selection modal")
+        return False
+
+    # Click 'New list...'
+    new_list_link = page.locator("div.list-selection a:has-text('New list'), div.list-selection button:has-text('New list')").first
+    if new_list_link.count() == 0:
+        print("  [!] Could not find 'New list' link in modal")
+        # Close modal
+        page.keyboard.press("Escape")
+        return False
+
+    new_list_link.click()
+    pause(1)
+
+    # We get redirected to the new list creation page
+    # Fill in the list name
+    name_input = page.locator("input[name='name'], input#list-name").first
+    if name_input.count() == 0:
+        # Maybe it opened inline — try inline input
+        name_input = page.locator("input[placeholder*='list' i], input[placeholder*='name' i]").first
+
+    if name_input.count() > 0:
+        name_input.fill(list_name)
+        pause(0.3)
+        create_btn = page.locator("button:has-text('Create'), button:has-text('Save'), button[type='submit']").first
+        if create_btn.count() > 0:
+            create_btn.click()
+            pause(2)
+            # Close any open modal/overlay so the page is in a clean state
+            page.keyboard.press("Escape")
+            pause(0.5)
+            print(f"  [ok] Created list '{list_name}'")
+            return True
+
+    print("  [!] Could not fill list name — you may need to create the list manually on Letterboxd first.")
     page.keyboard.press("Escape")
-    print(f"  [ok] Created list '{list_name}'")
-    return True
+    return False
+
+
+def add_film_to_list_via_modal(page, film_slug: str, list_name: str) -> bool:
+    """Open list modal and check the checkbox for our list."""
+    page.goto("about:blank")
+    pause(0.3)
+    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    pause(1)
+
+    if not open_list_selection_modal(page):
+        return False
+
+    modal = page.locator("div.list-selection")
+
+    # Search for our list in the search box
+    search_input = modal.locator("input[placeholder='Type to search']").first
+    if search_input.count() > 0:
+        search_input.fill(list_name)
+        pause(0.5)
+
+    # Find the label containing our list name
+    labels = modal.locator("label").all()
+    for label in labels:
+        text = label.inner_text().strip()
+        if normalize_title(list_name) in normalize_title(text):
+            checkbox = label.locator("input[type='checkbox']").first
+            if checkbox.count() > 0 and not checkbox.is_checked():
+                checkbox.click(force=True)
+                pause(0.3)
+            # Save
+            save_btn = page.locator("button:has-text('Save'), button:has-text('Done')").first
+            if save_btn.count() > 0:
+                save_btn.click()
+                pause(0.5)
+            else:
+                page.keyboard.press("Escape")
+                pause(0.3)
+            return True
+
+    # List not found in modal — close
+    page.keyboard.press("Escape")
+    return False
+
+
+def remove_film_from_list_via_modal(page, film_slug: str, list_name: str) -> bool:
+    """Open list modal and uncheck the checkbox for our list."""
+    page.goto("about:blank")
+    pause(0.3)
+    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    pause(1)
+
+    if not open_list_selection_modal(page):
+        return False
+
+    modal = page.locator("div.list-selection")
+
+    search_input = modal.locator("input[placeholder='Type to search']").first
+    if search_input.count() > 0:
+        search_input.fill(list_name)
+        pause(0.5)
+
+    labels = modal.locator("label").all()
+    for label in labels:
+        text = label.inner_text().strip()
+        if normalize_title(list_name) in normalize_title(text):
+            checkbox = label.locator("input[type='checkbox']").first
+            if checkbox.count() > 0 and checkbox.is_checked():
+                checkbox.click(force=True)
+                pause(0.3)
+            save_btn = page.locator("button:has-text('Save'), button:has-text('Done')").first
+            if save_btn.count() > 0:
+                save_btn.click()
+                pause(0.5)
+            else:
+                page.keyboard.press("Escape")
+                pause(0.3)
+            return True
+
+    page.keyboard.press("Escape")
+    return False
 
 
 def extract_year(text: str) -> str | None:
@@ -228,10 +337,13 @@ def search_film_slug(page, display_title: str, year: str, original_title: str) -
             queries.append(value)
 
     for query in queries:
-        page.goto(f"{BASE_URL}/search/{quote(query)}/", timeout=60_000)
-        pause(0.5)
+        url = f"{BASE_URL}/search/{quote(query)}/"
+        page.goto("about:blank")
+        pause(0.3)
+        page.goto(url, timeout=60_000, wait_until="networkidle")
+        pause(1.0)
 
-        results = page.locator("ul.results li, .results .poster-list li, .poster-list li")
+        results = page.locator("ul.results li")
         count = results.count()
         for index in range(min(count, 20)):
             item = results.nth(index)
@@ -244,13 +356,16 @@ def search_film_slug(page, display_title: str, year: str, original_title: str) -
                 continue
 
             slug = href.strip("/").split("/")[-1]
-            film_title = link.get_attribute("data-original-title") or link.get_attribute("data-film-name")
-            if not film_title:
-                film_title = link.get_attribute("title") or link.inner_text().strip()
 
-            meta_text = item.inner_text()
-            result_year = extract_year(meta_text) or extract_year(film_title)
+            # Extract title from first line of item text
+            meta_text = item.inner_text().strip()
+            first_line = meta_text.split("\n")[0].strip()
+            film_title = re.sub(r"\s*\b(18|19|20)\d{2}\b.*$", "", first_line).strip()
+
+            result_year = extract_year(first_line)
             if result_year and result_year != year:
+                continue
+            if not film_title:
                 continue
             if not titles_match(film_title, display_title, original_title):
                 continue
@@ -295,104 +410,52 @@ def get_list_film_slugs(page, list_url: str) -> list[str]:
     return slugs
 
 
-def open_list_modal(page) -> bool:
-    selectors = [
-        "button:has-text('Lists')",
-        "a:has-text('Lists')",
-        "button[data-action='list']",
-        "a.js-list-action",
-        "button.icon-lists",
-    ]
-    for selector in selectors:
-        button = page.locator(selector).first
-        if button.count() == 0:
-            continue
-        try:
-            button.click(timeout=5_000)
-            pause(0.5)
-            return True
-        except PlaywrightTimeoutError:
-            continue
-    return False
-
-
-def set_film_in_list(page, list_name: str, should_be_in_list: bool) -> bool:
-    if not open_list_modal(page):
-        return False
-
-    modal = page.locator(".modal, .overlay, [role='dialog']").last
-    labels = modal.locator("label")
-    for index in range(labels.count()):
-        label = labels.nth(index)
-        text = label.inner_text().strip()
-        if normalize_title(list_name) not in normalize_title(text):
-            continue
-
-        checkbox = label.locator("input[type='checkbox']").first
-        if checkbox.count() == 0:
-            checkbox = page.locator(f"input[type='checkbox']").nth(index)
-
-        checked = checkbox.is_checked()
-        if checked != should_be_in_list:
-            checkbox.click(force=True)
-            pause(0.3)
-
-        save_button = page.locator("button:has-text('Save'), button:has-text('Done')").first
-        if save_button.count() > 0:
-            save_button.click()
-            pause(0.5)
-        else:
-            page.keyboard.press("Escape")
-            pause(0.3)
-        return True
-
-    page.keyboard.press("Escape")
-    return False
-
-
-def add_film_to_list(page, film_slug: str, list_name: str) -> bool:
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000)
-    pause(0.5)
-    return set_film_in_list(page, list_name, should_be_in_list=True)
-
-
-def remove_film_from_list(page, film_slug: str, list_name: str) -> bool:
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000)
-    pause(0.5)
-    return set_film_in_list(page, list_name, should_be_in_list=False)
-
-
 def sync_letterboxd() -> None:
-    if not EMAIL or not PASSWORD:
-        print("Error: set LETTERBOXD_EMAIL and LETTERBOXD_PASSWORD in .env")
-        raise SystemExit(1)
-
     print("Configuration:")
-    print(f"  Email: {EMAIL}")
     print(f"  List: {LIST_NAME}")
     print(f"  CSV: {CSV_FILE}")
-    print(f"  Headless: {HEADLESS}")
+    print(f"  CDP URL: {CDP_URL}")
 
     csv_movies = load_csv_movies(CSV_FILE)
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=HEADLESS)
-        context_kwargs = {}
-        if Path(STORAGE_STATE).exists():
-            context_kwargs["storage_state"] = STORAGE_STATE
-            print(f"  Session file: {STORAGE_STATE}")
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
+        try:
+            browser = playwright.chromium.connect_over_cdp(CDP_URL)
+        except Exception as e:
+            print(f"\n[!] Could not connect to Chrome at {CDP_URL}")
+            print(f"    Error: {e}")
+            print()
+            print("    Launch Chrome first with:")
+            print('    pkill -x "Google Chrome" && sleep 2')
+            print('    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\')
+            print('      --remote-debugging-port=9222 \\')
+            print('      --user-data-dir="/Users/ardacildan/ChromeDebug" &')
+            raise SystemExit(1)
 
-        if not letterboxd_login(page, context, EMAIL, PASSWORD):
-            browser.close()
+        print(f"  [ok] Connected to Chrome")
+        context = browser.contexts[0]
+
+        # Reuse existing Letterboxd tab if available
+        page = None
+        for p in context.pages:
+            if "letterboxd.com" in p.url:
+                page = p
+                print(f"  [ok] Reusing existing Letterboxd tab: {p.url}")
+                break
+
+        if page is None:
+            page = context.new_page()
+            print("  [*] Opening new tab and navigating to letterboxd.com...")
+            page.goto(f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded")
+            pause(2)
+
+        if not letterboxd_login(page):
             raise SystemExit(1)
 
         username = get_username(page)
         if not username:
             print("[!] Could not determine Letterboxd username.")
             print("    Set LETTERBOXD_USERNAME in .env and run again.")
-            browser.close()
             raise SystemExit(1)
         print(f"  Username: {username}")
 
@@ -421,23 +484,27 @@ def sync_letterboxd() -> None:
 
             if not list_created:
                 print(f"  [{index}/{len(csv_movies)}] creating list with: {title} ({year})")
-                if create_list_with_film(page, film_slug, LIST_NAME):
+                if create_list(page, film_slug, LIST_NAME):
                     list_url = find_list(page, username, LIST_NAME)
-                    list_created = True
-                    list_slug_set.add(film_slug)
+                    list_created = bool(list_url)
+                    if not list_created:
+                        print("  [!] List created but could not find its URL. Please create the list manually on Letterboxd and restart.")
+                        raise SystemExit(1)
                 else:
-                    print(f"    [!] Could not create list using {title}")
-                continue
+                    print("  [!] Could not create list automatically.")
+                    print("      Please create a list named exactly:")
+                    print(f"      '{LIST_NAME}'")
+                    print("      on Letterboxd, then restart this script.")
+                    raise SystemExit(1)
 
             print(f"  [{index}/{len(csv_movies)}] adding: {title} ({year})")
-            if add_film_to_list(page, film_slug, LIST_NAME):
+            if add_film_to_list_via_modal(page, film_slug, LIST_NAME):
                 list_slug_set.add(film_slug)
             else:
                 print(f"    [!] Could not add {title} to list")
 
         if not list_url:
             print("\n[!] No list was created or found. Skipping removals.")
-            browser.close()
             return
 
         print("\n[5/5] Removing list films that are no longer in the CSV...")
@@ -446,7 +513,7 @@ def sync_letterboxd() -> None:
             if slug in csv_slug_set:
                 continue
             print(f"  removing: {slug}")
-            if remove_film_from_list(page, slug, LIST_NAME):
+            if remove_film_from_list_via_modal(page, slug, LIST_NAME):
                 removed += 1
             else:
                 print(f"    [!] Could not remove {slug} from list")
@@ -455,8 +522,6 @@ def sync_letterboxd() -> None:
         print(f"  List URL: {list_url}")
         print(f"  CSV films matched on Letterboxd: {len(csv_slug_set)}")
         print(f"  Removed from list: {removed}")
-
-        browser.close()
 
 
 if __name__ == "__main__":

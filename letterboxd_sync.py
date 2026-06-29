@@ -229,16 +229,26 @@ def create_list(page, film_slug: str, list_name: str) -> bool:
 
     if name_input.count() > 0:
         name_input.fill(list_name)
-        pause(0.3)
-        create_btn = page.locator("button:has-text('Create'), button:has-text('Save'), button[type='submit']").first
-        if create_btn.count() > 0:
-            create_btn.click()
-            pause(2)
-            # Close any open modal/overlay so the page is in a clean state
-            page.keyboard.press("Escape")
-            pause(0.5)
-            print(f"  [ok] Created list '{list_name}'")
-            return True
+        pause(0.5)
+
+        # Try pressing Enter to submit (works for both inline form and page redirect)
+        name_input.press("Enter")
+        pause(2)
+
+        # If still on the creation page, try clicking the visible Create button
+        if page.locator("input[name='name'], input#list-name").count() > 0:
+            create_btn = page.locator("button:has-text('Create'):not([form*=poster])").first
+            if create_btn.count() == 0:
+                create_btn = page.locator("button[type='submit']:not([form*=poster])").first
+            if create_btn.count() > 0:
+                create_btn.click()
+                pause(2)
+
+        # Close any open modal/overlay so the page is in a clean state
+        page.keyboard.press("Escape")
+        pause(0.5)
+        print(f"  [ok] Created list '{list_name}'")
+        return True
 
     print("  [!] Could not fill list name — you may need to create the list manually on Letterboxd first.")
     page.keyboard.press("Escape")
@@ -273,7 +283,8 @@ def add_film_to_list_via_modal(page, film_slug: str, list_name: str) -> bool:
                 checkbox.click(force=True)
                 pause(0.3)
             # Save
-            save_btn = page.locator("button:has-text('Save'), button:has-text('Done')").first
+            modal_container = page.locator("div.list-selection").locator("xpath=ancestor::*[contains(@class, 'dialog-panel') or contains(@class, 'modal') or contains(@class, 'overlay')][1]")
+            save_btn = modal_container.locator("button:has-text('Add'), button:has-text('Save'), button:has-text('Done')").first
             if save_btn.count() > 0:
                 save_btn.click()
                 pause(0.5)
@@ -312,7 +323,8 @@ def remove_film_from_list_via_modal(page, film_slug: str, list_name: str) -> boo
             if checkbox.count() > 0 and checkbox.is_checked():
                 checkbox.click(force=True)
                 pause(0.3)
-            save_btn = page.locator("button:has-text('Save'), button:has-text('Done')").first
+            modal_container = page.locator("div.list-selection").locator("xpath=ancestor::*[contains(@class, 'dialog-panel') or contains(@class, 'modal') or contains(@class, 'overlay')][1]")
+            save_btn = modal_container.locator("button:has-text('Add'), button:has-text('Save'), button:has-text('Done')").first
             if save_btn.count() > 0:
                 save_btn.click()
                 pause(0.5)
@@ -435,19 +447,11 @@ def sync_letterboxd() -> None:
         print(f"  [ok] Connected to Chrome")
         context = browser.contexts[0]
 
-        # Reuse existing Letterboxd tab if available
-        page = None
-        for p in context.pages:
-            if "letterboxd.com" in p.url:
-                page = p
-                print(f"  [ok] Reusing existing Letterboxd tab: {p.url}")
-                break
-
-        if page is None:
-            page = context.new_page()
-            print("  [*] Opening new tab and navigating to letterboxd.com...")
-            page.goto(f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded")
-            pause(2)
+        # Use a fresh tab to avoid stale state (unsaved drafts, popups) from previous runs
+        page = context.new_page()
+        print("  [*] Opening new tab and navigating to letterboxd.com...")
+        page.goto(f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded")
+        pause(2)
 
         if not letterboxd_login(page):
             raise SystemExit(1)
@@ -457,6 +461,7 @@ def sync_letterboxd() -> None:
             print("[!] Could not determine Letterboxd username.")
             print("    Set LETTERBOXD_USERNAME in .env and run again.")
             raise SystemExit(1)
+        username = username.lower()
         print(f"  Username: {username}")
 
         list_url = find_list(page, username, LIST_NAME)

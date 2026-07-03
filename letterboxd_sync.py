@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import quote, urljoin
 
 from dotenv import load_dotenv
+from film_cache import FilmCache
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -470,13 +471,22 @@ def sync_letterboxd() -> None:
         csv_slug_set: set[str] = set()
         list_created = bool(list_url)
 
+        cache = FilmCache()
         print("\n[4/5] Syncing CSV movies to the list (in CSV order)...")
         for index, movie in enumerate(csv_movies, start=1):
             title = movie["title"]
             year = movie["year"]
             original_title = movie["original_title"]
 
-            film_slug = search_film_slug(page, title, year, original_title)
+            # --- slug lookup: cache first, search only on MISS ---
+            cached = cache.get(title, year, original_title)
+            if cached == "MISS":
+                film_slug = search_film_slug(page, title, year, original_title)
+                cache.set(title, year, original_title, film_slug)
+                cache.save()  # persist after every new lookup
+            else:
+                film_slug = cached  # may be None (previously not found) or a slug
+
             if not film_slug:
                 print(f"  [{index}/{len(csv_movies)}] not found: {title} ({year})")
                 continue
@@ -523,10 +533,12 @@ def sync_letterboxd() -> None:
             else:
                 print(f"    [!] Could not remove {slug} from list")
 
+        found, not_found = cache.stats()
         print("\nSync complete.")
         print(f"  List URL: {list_url}")
         print(f"  CSV films matched on Letterboxd: {len(csv_slug_set)}")
         print(f"  Removed from list: {removed}")
+        print(f"  Cache: {found} found, {not_found} not-found entries")
 
 
 if __name__ == "__main__":

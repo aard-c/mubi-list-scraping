@@ -56,3 +56,6 @@ Run with the browser visible the first time (`LETTERBOXD_HEADLESS=false` in `.en
 | `LETTERBOXD_DELAY_SECONDS` | Pause between page actions | `1.0` |
 
 See `.env.example` for a copy-paste template.
+
+
+-- make faster checking movies after first run, make a separete script if its necesarry.

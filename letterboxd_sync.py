@@ -5,14 +5,15 @@ Sync mubifinder_turkey_available.csv to a Letterboxd list.
 HOW TO RUN:
 1. Kill Chrome and relaunch with remote debugging:
    pkill -x "Google Chrome" && sleep 2
-   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-     --remote-debugging-port=9222 \
+   /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+     --remote-debugging-port=9222
      --user-data-dir="/Users/ardacildan/ChromeDebug" &
 2. Log into Letterboxd in that Chrome window.
 3. Run: python3 letterboxd_sync.py
 """
 
 import csv
+import json
 import os
 import re
 import sys
@@ -22,7 +23,6 @@ from pathlib import Path
 from urllib.parse import quote, urljoin
 
 from dotenv import load_dotenv
-from film_cache import FilmCache
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -35,6 +35,75 @@ REQUEST_DELAY = float(os.getenv("LETTERBOXD_DELAY_SECONDS", "1.0"))
 CDP_URL = os.getenv("LETTERBOXD_CDP_URL", "http://localhost:9222")
 
 BASE_URL = "https://letterboxd.com"
+
+CACHE_FILE = Path("letterboxd_film_cache.json")
+
+
+def _normalize(value: str) -> str:
+    if not value:
+        return ""
+    text = unicodedata.normalize("NFKD", value)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def cache_key(title: str, year: str, original_title: str) -> str:
+    return f"{_normalize(title)}|{year}|{_normalize(original_title)}"
+
+
+class FilmCache:
+    def __init__(self, path: Path = CACHE_FILE):
+        self.path = path
+        self.data: dict = {}
+        self.dirty = False
+        self.load()
+
+    def load(self) -> None:
+        if self.path.exists():
+            try:
+                with self.path.open("r", encoding="utf-8") as handle:
+                    self.data = json.load(handle)
+                print(f"  [cache] Loaded {len(self.data)} cached lookups from {self.path}")
+            except (json.JSONDecodeError, OSError):
+                print(f"  [cache] Could not read {self.path}, starting fresh")
+                self.data = {}
+        else:
+            self.data = {}
+
+    def save(self) -> None:
+        if not self.dirty:
+            return
+        try:
+            with self.path.open("w", encoding="utf-8") as handle:
+                json.dump(self.data, handle, ensure_ascii=False, indent=2)
+            self.dirty = False
+        except OSError as error:
+            print(f"  [cache] Warning: could not save cache: {error}")
+
+    def get(self, title: str, year: str, original_title: str):
+        """
+        Returns:
+          - "MISS" (sentinel) if not in cache -> caller should search
+          - None if cached as "not found on Letterboxd"
+          - str (slug) if cached as found
+        """
+        key = cache_key(title, year, original_title)
+        entry = self.data.get(key)
+        if entry is None:
+            return "MISS"
+        return entry.get("slug")
+
+    def set(self, title: str, year: str, original_title: str, slug: str | None) -> None:
+        key = cache_key(title, year, original_title)
+        self.data[key] = {"slug": slug, "title": title, "year": year}
+        self.dirty = True
+
+    def stats(self) -> tuple[int, int]:
+        found = sum(1 for value in self.data.values() if value.get("slug"))
+        not_found = sum(1 for value in self.data.values() if not value.get("slug"))
+        return found, not_found
 
 
 def normalize_title(value: str) -> str:
@@ -388,10 +457,16 @@ def search_film_slug(page, display_title: str, year: str, original_title: str) -
     return None
 
 
-def get_list_film_slugs(page, list_url: str) -> list[str]:
+def get_list_film_slugs(page, list_url: str) -> tuple[list[str], dict[str, dict]]:
+    """Return (slugs, slug_meta) where slug_meta maps slug -> {title, year, original_title}.
+
+    Reads data-film-slug / data-film-name / data-film-year attributes from poster
+    divs so we can pre-populate the film cache without extra searches.
+    """
     print("\n[3/5] Reading current films in the Letterboxd list...")
     slugs: list[str] = []
     seen: set[str] = set()
+    slug_meta: dict[str, dict] = {}
     page_num = 1
 
     while True:
@@ -399,8 +474,22 @@ def get_list_film_slugs(page, list_url: str) -> list[str]:
         page.goto(url, timeout=60_000)
         pause(0.5)
 
-        links = page.locator("a[href*='/film/']").all()
+        # --- collect slugs + metadata from poster divs (data-* attributes) ---
+        poster_divs = page.locator("div[data-film-slug]").all()
         page_slugs = []
+        for div in poster_divs:
+            slug = (div.get_attribute("data-film-slug") or "").strip()
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            page_slugs.append(slug)
+            title = (div.get_attribute("data-film-name") or "").strip()
+            year = (div.get_attribute("data-film-release-year") or "").strip()
+            if title:
+                slug_meta[slug] = {"title": title, "year": year, "original_title": ""}
+
+        # --- fallback: collect from <a href=/film/…> links for any missed slugs ---
+        links = page.locator("a[href*='/film/']").all()
         for link in links:
             href = link.get_attribute("href") or ""
             if "/film/" not in href:
@@ -419,8 +508,8 @@ def get_list_film_slugs(page, list_url: str) -> list[str]:
             break
         page_num += 1
 
-    print(f"  [ok] Found {len(slugs)} films in list")
-    return slugs
+    print(f"  [ok] Found {len(slugs)} films in list ({len(slug_meta)} with metadata)")
+    return slugs, slug_meta
 
 
 def sync_letterboxd() -> None:
@@ -466,12 +555,30 @@ def sync_letterboxd() -> None:
         print(f"  Username: {username}")
 
         list_url = find_list(page, username, LIST_NAME)
-        list_slugs = get_list_film_slugs(page, list_url) if list_url else []
+        if list_url:
+            list_slugs, list_slug_meta = get_list_film_slugs(page, list_url)
+        else:
+            list_slugs, list_slug_meta = [], {}
         list_slug_set = set(list_slugs)
         csv_slug_set: set[str] = set()
         list_created = bool(list_url)
 
         cache = FilmCache()
+
+        # --- Pre-populate cache from list metadata so already-in-list films
+        #     are resolved instantly without a Letterboxd search on every run. ---
+        pre_cached = 0
+        for slug, meta in list_slug_meta.items():
+            title = meta["title"]
+            year = meta["year"]
+            orig = meta["original_title"]
+            if cache.get(title, year, orig) == "MISS":
+                cache.set(title, year, orig, slug)
+                pre_cached += 1
+        if pre_cached:
+            cache.save()
+            print(f"  [cache] Pre-cached {pre_cached} films from existing list")
+
         print("\n[4/5] Syncing CSV movies to the list (in CSV order)...")
         for index, movie in enumerate(csv_movies, start=1):
             title = movie["title"]

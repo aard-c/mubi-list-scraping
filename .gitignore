@@ -2,3 +2,7 @@
 .letterboxd_auth.json
 login_debug.png
 letterboxs_cookies.json
+__pycache__/
+*.pyc
+*.log
+letterboxd_film_cache.json

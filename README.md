@@ -9,7 +9,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-Copy `.env.example` to `.env` and fill in your Letterboxd credentials (only needed for the sync script):
+Copy `.env.example` to `.env` and fill in your Letterboxd username/settings (only needed for the sync script):
 
 ```bash
 cp .env.example .env
@@ -31,31 +31,43 @@ python mubifinder-tr.py
 
 Reads `mubifinder_turkey_available.csv` directly — it does **not** re-run the scraper.
 
-The script logs into Letterboxd, finds or creates the list **MUBI all Movies TR**, then:
+The sync script connects to an already-running Chrome window through the Chrome DevTools Protocol. That means Chrome must be started in remote-debugging mode **before** you run `letterboxd_sync.py`.
 
-1. Walks each CSV row in order
-2. Searches Letterboxd and matches by year + title / original title
-3. Skips films already in the list, adds missing ones
-4. Removes films from the Letterboxd list that are no longer in the CSV
+### Start Chrome in debug mode
 
 ```bash
-python letterboxd_sync.py
+pkill -x "Google Chrome" && sleep 2
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="/Users/ardacildan/ChromeDebug" &
 ```
 
-Run with the browser visible the first time (`LETTERBOXD_HEADLESS=false` in `.env`) so you can confirm login and list actions work.
+Then log into Letterboxd in that Chrome window, and run:
+
+```bash
+python3 letterboxd_sync.py
+```
+
+### What the sync does
+
+The script loads `mubifinder_turkey_available.csv`, finds or creates the Letterboxd list **MUBI all Movies TR**, then:
+
+1. Walks each CSV row in order
+2. Searches Letterboxd and matches by year plus title/original title
+3. Skips films already in the list and adds missing ones
+4. Removes films from the Letterboxd list that are no longer in the CSV
+5. Caches lookup results in `letterboxd_film_cache.json` so later runs are faster
+
+If you want to force fresh lookups, delete `letterboxd_film_cache.json` and run the sync again.
 
 ### Environment variables
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `LETTERBOXD_EMAIL` | Letterboxd email or username | *(required)* |
-| `LETTERBOXD_PASSWORD` | Letterboxd password | *(required)* |
+| `LETTERBOXD_USERNAME` | Your Letterboxd username | *(required if the script cannot infer it from the page)* |
 | `LETTERBOXD_LIST_NAME` | Target list name | `MUBI all Movies TR` |
 | `LETTERBOXD_CSV_FILE` | CSV path to sync | `mubifinder_turkey_available.csv` |
-| `LETTERBOXD_HEADLESS` | Run browser without UI | `false` |
 | `LETTERBOXD_DELAY_SECONDS` | Pause between page actions | `1.0` |
+| `LETTERBOXD_CDP_URL` | Chrome debugging endpoint | `http://localhost:9222` |
 
-See `.env.example` for a copy-paste template.
-
-
--- make faster checking movies after first run, make a separete script if its necesarry.
+See `.env.example` for the current template.

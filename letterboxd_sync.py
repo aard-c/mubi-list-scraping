@@ -368,6 +368,27 @@ def add_film_to_list_via_modal(page, film_slug: str, list_name: str) -> bool:
     return False
 
 
+def film_is_on_mubi_tr(page, film_slug: str) -> bool:
+    """Check the film detail page for the MUBI TR availability badge."""
+    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    pause(0.8)
+
+    watch_panel = page.locator("section.watch-panel.js-watch-panel").first
+    if watch_panel.count() == 0:
+        return False
+
+    mubi_service = watch_panel.locator("p#source-mubi.service.-mubi").first
+    if mubi_service.count() == 0:
+        return False
+
+    try:
+        text = (mubi_service.inner_text() or "").upper()
+    except Exception:
+        text = ""
+
+    return "MUBI" in text and "TR" in text
+
+
 def remove_film_from_list_via_modal(page, film_slug: str, list_name: str) -> bool:
     """Open the list-card overflow menu and remove the film from the list."""
     item = page.locator(f"li.posteritem:has(div[data-item-slug='{film_slug}'])").first
@@ -587,21 +608,40 @@ def get_list_film_slugs(page, list_url: str) -> tuple[list[str], dict[str, dict]
     return slugs, slug_meta
 
 
-def open_list_services_filter(page, list_url: str) -> bool:
-    """Open the built-in 'Films not on any service' list URL."""
-    service_url = f"{list_url.rstrip('/')}/on/no-services/"
-    print("\n[6/6] Filtering list to films not on any service...")
+def open_list_mubi_tr_filter(page, list_url: str) -> bool:
+    """Open the MUBI TR exclusion filter for this list."""
+    service_url = f"{list_url.rstrip('/')}/not/on/mubi-tr/"
+    print("\n[6/6] Filtering list to films not on MUBI TR...")
     try:
         page.goto(service_url, timeout=60_000, wait_until="domcontentloaded")
         pause(1.0)
-        if "on/no-services" in (page.url or ""):
+        current_url = page.url or ""
+        if "/not/on/mubi-tr/" in current_url:
             print(f"  [ok] Opened service filter: {service_url}")
             return True
     except Exception as error:
-        print(f"  [!] Could not open service filter URL: {error}")
+        print(f"  [!] Could not open MUBI TR filter URL: {error}")
         return False
 
-    print("  [!] Could not open the service filter page")
+    try:
+        page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+        pause(0.5)
+        exclusion_link = page.locator("a:has-text('Exclude matching films')").first
+        mubi_link = page.locator("a[href*='/not/on/mubi-tr/'], a[href*='/on/mubi-tr/']").first
+        if exclusion_link.count() > 0:
+            exclusion_link.click(timeout=5_000, force=True)
+            pause(0.8)
+        if mubi_link.count() > 0:
+            mubi_link.click(timeout=5_000, force=True)
+            pause(1.0)
+            if "/not/on/mubi-tr/" in (page.url or ""):
+                print("  [ok] Selected Exclude matching films + MUBI TR")
+                return True
+    except Exception as error:
+        print(f"  [!] Could not activate MUBI TR filter in the UI: {error}")
+        return False
+
+    print("  [!] Could not open the MUBI TR service filter page")
     return False
 
 
@@ -708,6 +748,10 @@ def sync_letterboxd() -> None:
                 print(f"  [{index}/{len(csv_movies)}] already in list: {title} ({year})")
                 continue
 
+            if not film_is_on_mubi_tr(page, film_slug):
+                print(f"  [{index}/{len(csv_movies)}] not on MUBI TR: {title} ({year})")
+                continue
+
             if not list_created:
                 print(f"  [{index}/{len(csv_movies)}] creating list with: {title} ({year})")
                 if create_list(page, film_slug, LIST_NAME):
@@ -745,49 +789,48 @@ def sync_letterboxd() -> None:
                 print(f"    [!] Could not remove {slug} from list")
 
         removed_no_service = 0
-        page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
-        pause(0.5)
-        if open_list_services_filter(page, list_url):
-            page_index = 1
-            while True:
-                current_page_url = page.url
-                current_slugs, _ = collect_current_page_film_slugs(page)
-                print(f"  [ok] Page {page_index}: {len(current_slugs)} films with no service")
-                next_href = get_next_page_href(page)
+        for cleanup_round in range(1, 3):
+            print(f"\n[6/6] MUBI TR cleanup pass {cleanup_round}/2...")
+            page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+            pause(0.5)
+            if open_list_mubi_tr_filter(page, list_url):
+                page_index = 1
+                while True:
+                    current_slugs, _ = collect_current_page_film_slugs(page)
+                    print(f"  [ok] Page {page_index}: {len(current_slugs)} films not on MUBI TR")
+                    next_href = get_next_page_href(page)
 
-                if not current_slugs:
+                    if not current_slugs:
+                        if not next_href:
+                            break
+                        page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+                        pause(0.5)
+                        page_index += 1
+                        continue
+
+                    for slug in current_slugs:
+                        print(f"  removing (not on MUBI TR): {slug}")
+                        if remove_film_from_list_via_modal(page, slug, LIST_NAME):
+                            removed_no_service += 1
+                            pause(0.7)
+                        else:
+                            print(f"    [!] Could not remove {slug} from list")
+                            pause(0.7)
+
                     if not next_href:
                         break
                     page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
-                    pause(0.5)
+                    pause(0.7)
                     page_index += 1
-                    continue
-
-                for slug in current_slugs:
-                    print(f"  removing (no service): {slug}")
-                    if remove_film_from_list_via_modal(page, slug, LIST_NAME):
-                        removed_no_service += 1
-                        page.goto(current_page_url, timeout=60_000, wait_until="domcontentloaded")
-                        pause(0.7)
-                    else:
-                        print(f"    [!] Could not remove {slug} from list")
-                        page.goto(current_page_url, timeout=60_000, wait_until="domcontentloaded")
-                        pause(0.7)
-
-                if not next_href:
-                    break
-                page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
-                pause(0.7)
-                page_index += 1
-        else:
-            print("  [!] Skipping no-service cleanup because the filter could not be opened")
+            else:
+                print("  [!] Skipping MUBI TR cleanup because the filter could not be opened")
 
         found, not_found = cache.stats()
         print("\nSync complete.")
         print(f"  List URL: {list_url}")
         print(f"  CSV films matched on Letterboxd: {len(csv_slug_set)}")
         print(f"  Removed from list: {removed}")
-        print(f"  Removed with no service: {removed_no_service}")
+        print(f"  Removed not on MUBI TR: {removed_no_service}")
         print(f"  Cache: {found} found, {not_found} not-found entries")
 
 

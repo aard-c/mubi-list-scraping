@@ -4,16 +4,33 @@ Tools to scrape Turkey-available MUBI films from MubiFinder and sync them to a L
 
 ## Setup
 
+If you’re running this for the first time, create and activate a Python virtual environment first:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Then install dependencies:
+
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-Copy `.env.example` to `.env` and fill in your Letterboxd username/settings (only needed for the sync script):
+Copy `.env.example` to `.env` and fill in your Letterboxd username/settings before running the sync:
 
 ```bash
 cp .env.example .env
 ```
+
+For a one-command first run, you can use:
+
+```bash
+./first_run.sh
+```
+
+That script will install requirements, run the scraper, restart Chrome in debug mode, wait for you to log in, and then run the sync.
 
 ## 1. Scrape MubiFinder (Turkey, available)
 
@@ -47,6 +64,8 @@ Then log into Letterboxd in that Chrome window, and run:
 ```bash
 python3 letterboxd_sync.py
 ```
+
+If you already used `./first_run.sh`, you can skip the manual Chrome restart step.
 
 ### What the sync does
 

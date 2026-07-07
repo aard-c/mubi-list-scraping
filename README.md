@@ -56,7 +56,8 @@ The script loads `mubifinder_turkey_available.csv`, finds or creates the Letterb
 2. Searches Letterboxd and matches by year plus title/original title
 3. Skips films already in the list and adds missing ones
 4. Removes films from the Letterboxd list that are no longer in the CSV
-5. Caches lookup results in `letterboxd_film_cache.json` so later runs are faster
+5. Opens the list filter and removes any films that show up under **Films not on any service**
+6. Caches lookup results in `letterboxd_film_cache.json` so later runs are faster
 
 If you want to force fresh lookups, delete `letterboxd_film_cache.json` and run the sync again.
 

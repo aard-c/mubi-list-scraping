@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 *.log
 letterboxd_film_cache.json
+mubifinder_turkey_available.csv

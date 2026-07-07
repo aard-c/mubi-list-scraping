@@ -369,41 +369,81 @@ def add_film_to_list_via_modal(page, film_slug: str, list_name: str) -> bool:
 
 
 def remove_film_from_list_via_modal(page, film_slug: str, list_name: str) -> bool:
-    """Open list modal and uncheck the checkbox for our list."""
-    page.goto("about:blank")
-    pause(0.3)
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
-    pause(1)
-
-    if not open_list_selection_modal(page):
+    """Open the list-card overflow menu and remove the film from the list."""
+    item = page.locator(f"li.posteritem:has(div[data-item-slug='{film_slug}'])").first
+    if item.count() == 0:
         return False
 
-    modal = page.locator("div.list-selection")
+    try:
+        item.scroll_into_view_if_needed(timeout=5_000)
+        pause(0.2)
+        poster = item.locator("div.poster.film-poster").first
+        if poster.count() > 0:
+            poster.hover(timeout=5_000)
+        else:
+            item.hover(timeout=5_000)
+        pause(0.4)
+    except Exception:
+        pass
 
-    search_input = modal.locator("input[placeholder='Type to search']").first
-    if search_input.count() > 0:
-        search_input.fill(list_name)
-        pause(0.5)
+    menu_trigger = item.locator("span.replace.menu-link.icon").first
+    if menu_trigger.count() == 0:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
 
-    labels = modal.locator("label").all()
-    for label in labels:
-        text = label.inner_text().strip()
-        if normalize_title(list_name) in normalize_title(text):
-            checkbox = label.locator("input[type='checkbox']").first
-            if checkbox.count() > 0 and checkbox.is_checked():
-                checkbox.click(force=True)
-                pause(0.3)
-            modal_container = page.locator("div.list-selection").locator("xpath=ancestor::*[contains(@class, 'dialog-panel') or contains(@class, 'modal') or contains(@class, 'overlay')][1]")
-            save_btn = modal_container.locator("button:has-text('Add'), button:has-text('Save'), button:has-text('Done')").first
-            if save_btn.count() > 0:
-                save_btn.click()
-                pause(0.5)
-            else:
+    try:
+        menu_trigger.click(timeout=5_000, force=True)
+        pause(0.7)
+    except Exception:
+        try:
+            menu_trigger.hover(timeout=5_000)
+            pause(0.3)
+            menu_trigger.click(timeout=5_000)
+            pause(0.7)
+        except Exception:
+            try:
                 page.keyboard.press("Escape")
-                pause(0.3)
-            return True
+            except Exception:
+                pass
+            return False
 
-    page.keyboard.press("Escape")
+    remove_candidates = [
+        page.locator("div.popmenu:not([hidden])").get_by_text("Remove from this list", exact=True),
+        page.locator("div.popmenu:visible").get_by_text("Remove from this list", exact=True),
+        page.get_by_text("Remove from this list", exact=True),
+    ]
+
+    for candidate in remove_candidates:
+        try:
+            if candidate.count() > 0:
+                candidate.click(timeout=5_000)
+                pause(0.8)
+                break
+        except Exception:
+            continue
+
+    confirm_candidates = [
+        page.get_by_role("button", name="Remove Film"),
+        page.locator("button:has-text('Remove Film')"),
+        page.locator("button:has-text('Confirm Removal')"),
+    ]
+
+    for candidate in confirm_candidates:
+        try:
+            if candidate.count() > 0:
+                candidate.first.click(timeout=5_000, force=True)
+                pause(1.0)
+                return True
+        except Exception:
+            continue
+
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
     return False
 
 
@@ -414,7 +454,7 @@ def extract_year(text: str) -> str | None:
 
 def search_film_slug(page, display_title: str, year: str, original_title: str) -> str | None:
     queries = []
-    for value in (display_title, original_title, f"{display_title} {year}", f"{original_title} {year}"):
+    for value in (f"{original_title} {year}", f"{display_title} {year}"):
         if value and value not in queries:
             queries.append(value)
 
@@ -457,22 +497,13 @@ def search_film_slug(page, display_title: str, year: str, original_title: str) -
     return None
 
 
-def get_list_film_slugs(page, list_url: str) -> tuple[list[str], dict[str, dict]]:
-    """Return (slugs, slug_meta) where slug_meta maps slug -> {title, year, original_title}.
-
-    Reads data-film-slug / data-film-name / data-film-year attributes from poster
-    divs so we can pre-populate the film cache without extra searches.
-    """
-    print("\n[3/5] Reading current films in the Letterboxd list...")
+def collect_list_film_slugs(page) -> tuple[list[str], dict[str, dict]]:
+    """Return (slugs, slug_meta) from the current Letterboxd list state."""
     slugs: list[str] = []
     seen: set[str] = set()
     slug_meta: dict[str, dict] = {}
-    page_num = 1
 
     while True:
-        url = list_url if page_num == 1 else f"{list_url.rstrip('/')}/page/{page_num}/"
-        page.goto(url, timeout=60_000)
-        pause(0.5)
 
         # --- collect slugs + metadata from poster divs (data-* attributes) ---
         poster_divs = page.locator("div[data-film-slug]").all()
@@ -506,10 +537,79 @@ def get_list_film_slugs(page, list_url: str) -> tuple[list[str], dict[str, dict]
         next_page = page.locator("a.next").first
         if next_page.count() == 0 or not next_page.is_visible():
             break
-        page_num += 1
+        next_href = next_page.get_attribute("href") or ""
+        if not next_href:
+            break
+        page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+        pause(0.5)
 
+    return slugs, slug_meta
+
+
+def collect_current_page_film_slugs(page) -> tuple[list[str], dict[str, dict]]:
+    """Return (slugs, slug_meta) for only the currently visible list page."""
+    slugs: list[str] = []
+    slug_meta: dict[str, dict] = {}
+    seen: set[str] = set()
+
+    poster_divs = page.locator("div[data-film-slug]").all()
+    for div in poster_divs:
+        slug = (div.get_attribute("data-film-slug") or "").strip()
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        slugs.append(slug)
+        title = (div.get_attribute("data-film-name") or "").strip()
+        year = (div.get_attribute("data-film-release-year") or "").strip()
+        if title:
+            slug_meta[slug] = {"title": title, "year": year, "original_title": ""}
+
+    links = page.locator("a[href*='/film/']").all()
+    for link in links:
+        href = link.get_attribute("href") or ""
+        if "/film/" not in href:
+            continue
+        slug = href.strip("/").split("/")[-1]
+        if slug and slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
+
+    return slugs, slug_meta
+
+
+def get_list_film_slugs(page, list_url: str) -> tuple[list[str], dict[str, dict]]:
+    """Read all list films from the unfiltered list page."""
+    print("\n[3/5] Reading current films in the Letterboxd list...")
+    page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+    pause(0.5)
+    slugs, slug_meta = collect_list_film_slugs(page)
     print(f"  [ok] Found {len(slugs)} films in list ({len(slug_meta)} with metadata)")
     return slugs, slug_meta
+
+
+def open_list_services_filter(page, list_url: str) -> bool:
+    """Open the built-in 'Films not on any service' list URL."""
+    service_url = f"{list_url.rstrip('/')}/on/no-services/"
+    print("\n[6/6] Filtering list to films not on any service...")
+    try:
+        page.goto(service_url, timeout=60_000, wait_until="domcontentloaded")
+        pause(1.0)
+        if "on/no-services" in (page.url or ""):
+            print(f"  [ok] Opened service filter: {service_url}")
+            return True
+    except Exception as error:
+        print(f"  [!] Could not open service filter URL: {error}")
+        return False
+
+    print("  [!] Could not open the service filter page")
+    return False
+
+
+def get_next_page_href(page) -> str | None:
+    next_page = page.locator("a.next").first
+    if next_page.count() == 0 or not next_page.is_visible():
+        return None
+    return next_page.get_attribute("href") or None
 
 
 def sync_letterboxd() -> None:
@@ -572,7 +672,7 @@ def sync_letterboxd() -> None:
             title = meta["title"]
             year = meta["year"]
             orig = meta["original_title"]
-            if cache.get(title, year, orig) == "MISS":
+            if cache.get(title, year, orig) != slug:
                 cache.set(title, year, orig, slug)
                 pre_cached += 1
         if pre_cached:
@@ -585,12 +685,16 @@ def sync_letterboxd() -> None:
             year = movie["year"]
             original_title = movie["original_title"]
 
-            # --- slug lookup: cache first, search only on MISS ---
+            # --- slug lookup: cache first, retry stale not-found entries, search with year included ---
             cached = cache.get(title, year, original_title)
             if cached == "MISS":
                 film_slug = search_film_slug(page, title, year, original_title)
                 cache.set(title, year, original_title, film_slug)
                 cache.save()  # persist after every new lookup
+            elif cached is None:
+                film_slug = search_film_slug(page, title, year, original_title)
+                cache.set(title, year, original_title, film_slug)
+                cache.save()
             else:
                 film_slug = cached  # may be None (previously not found) or a slug
 
@@ -640,11 +744,50 @@ def sync_letterboxd() -> None:
             else:
                 print(f"    [!] Could not remove {slug} from list")
 
+        removed_no_service = 0
+        page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+        pause(0.5)
+        if open_list_services_filter(page, list_url):
+            page_index = 1
+            while True:
+                current_page_url = page.url
+                current_slugs, _ = collect_current_page_film_slugs(page)
+                print(f"  [ok] Page {page_index}: {len(current_slugs)} films with no service")
+                next_href = get_next_page_href(page)
+
+                if not current_slugs:
+                    if not next_href:
+                        break
+                    page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+                    pause(0.5)
+                    page_index += 1
+                    continue
+
+                for slug in current_slugs:
+                    print(f"  removing (no service): {slug}")
+                    if remove_film_from_list_via_modal(page, slug, LIST_NAME):
+                        removed_no_service += 1
+                        page.goto(current_page_url, timeout=60_000, wait_until="domcontentloaded")
+                        pause(0.7)
+                    else:
+                        print(f"    [!] Could not remove {slug} from list")
+                        page.goto(current_page_url, timeout=60_000, wait_until="domcontentloaded")
+                        pause(0.7)
+
+                if not next_href:
+                    break
+                page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+                pause(0.7)
+                page_index += 1
+        else:
+            print("  [!] Skipping no-service cleanup because the filter could not be opened")
+
         found, not_found = cache.stats()
         print("\nSync complete.")
         print(f"  List URL: {list_url}")
         print(f"  CSV films matched on Letterboxd: {len(csv_slug_set)}")
         print(f"  Removed from list: {removed}")
+        print(f"  Removed with no service: {removed_no_service}")
         print(f"  Cache: {found} found, {not_found} not-found entries")
 
 

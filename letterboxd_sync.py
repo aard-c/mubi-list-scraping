@@ -22,6 +22,8 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import quote, urljoin
 
+from playwright.sync_api import Error as PlaywrightError
+
 from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -32,7 +34,17 @@ USERNAME = os.getenv("LETTERBOXD_USERNAME")
 LIST_NAME = os.getenv("LETTERBOXD_LIST_NAME", "MUBI all Movies TR")
 CSV_FILE = os.getenv("LETTERBOXD_CSV_FILE", "mubifinder_turkey_available.csv")
 REQUEST_DELAY = float(os.getenv("LETTERBOXD_DELAY_SECONDS", "1.0"))
-CDP_URL = os.getenv("LETTERBOXD_CDP_URL", "http://localhost:9222")
+LOGIN_WAIT_SECONDS = float(os.getenv("LETTERBOXD_LOGIN_WAIT_SECONDS", "45"))
+
+
+def _default_cdp_url() -> str:
+    configured = os.getenv("LETTERBOXD_CDP_URL", "").strip()
+    if configured:
+        return configured.replace("localhost", "127.0.0.1")
+    return "http://127.0.0.1:9222"
+
+
+CDP_URL = _default_cdp_url()
 
 BASE_URL = "https://letterboxd.com"
 
@@ -154,6 +166,15 @@ def pause(seconds: float | None = None) -> None:
     time.sleep(seconds if seconds is not None else REQUEST_DELAY)
 
 
+def safe_goto(page, url: str, *, timeout: int = 60_000, wait_until: str = "domcontentloaded") -> bool:
+    try:
+        page.goto(url, timeout=timeout, wait_until=wait_until)
+        return True
+    except PlaywrightError as error:
+        print(f"  [!] Navigation timed out for {url}: {error}")
+        return False
+
+
 def check_logged_in_on_page(page) -> bool:
     try:
         return page.locator("a:has-text('Sign Out'), a[href*='sign-out']").count() > 0
@@ -163,7 +184,8 @@ def check_logged_in_on_page(page) -> bool:
 
 def navigate_and_check_logged_in(page) -> bool:
     try:
-        page.goto(f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded")
+        if not safe_goto(page, f"{BASE_URL}/", timeout=60_000, wait_until="domcontentloaded"):
+            return False
         pause(1)
         return page.locator("a:has-text('Sign Out'), a[href*='sign-out']").count() > 0
     except Exception:
@@ -174,7 +196,8 @@ def get_username(page) -> str | None:
     if USERNAME:
         return USERNAME.strip()
 
-    page.goto(f"{BASE_URL}/settings/", timeout=60_000, wait_until="domcontentloaded")
+    if not safe_goto(page, f"{BASE_URL}/settings/", timeout=60_000, wait_until="domcontentloaded"):
+        return None
     pause(0.3)
 
     try:
@@ -208,11 +231,18 @@ def letterboxd_login(page) -> bool:
     print("  [!] Not logged in.")
     print("      Please log into Letterboxd in the Chrome window.")
     print("      Complete any Cloudflare check first, then sign in.")
-    print("  Waiting up to 10 minutes for you to log in...")
+    if LOGIN_WAIT_SECONDS <= 0:
+        print("  [!] Login wait disabled; exiting.")
+        return False
+    print(f"  Waiting up to {int(LOGIN_WAIT_SECONDS)} seconds for you to log in...")
 
-    for second in range(600):
-        if second > 0 and second % 15 == 0:
-            print(f"  ...still waiting ({second // 60}m {second % 60}s)")
+    deadline = time.monotonic() + LOGIN_WAIT_SECONDS
+    while True:
+        elapsed = int(deadline - time.monotonic())
+        if elapsed <= 0:
+            break
+        if int(LOGIN_WAIT_SECONDS) - elapsed > 0 and (int(LOGIN_WAIT_SECONDS) - elapsed) % 15 == 0:
+            print(f"  ...still waiting ({(int(LOGIN_WAIT_SECONDS) - elapsed) // 60}m {(int(LOGIN_WAIT_SECONDS) - elapsed) % 60}s)")
         pause(1)
         if check_logged_in_on_page(page):
             print("  [ok] Logged in!")
@@ -224,7 +254,8 @@ def letterboxd_login(page) -> bool:
 
 def find_list(page, username: str, list_name: str) -> str | None:
     print(f"\n[2/5] Finding list '{list_name}'...")
-    page.goto(f"{BASE_URL}/{username}/lists/", timeout=60_000, wait_until="domcontentloaded")
+    if not safe_goto(page, f"{BASE_URL}/{username}/lists/", timeout=60_000, wait_until="domcontentloaded"):
+        return None
     pause()
 
     for link in page.locator(f"a[href*='/{username}/list/']").all():
@@ -272,7 +303,8 @@ def create_list(page, film_slug: str, list_name: str) -> bool:
     print(f"  [*] Creating list '{list_name}'...")
     page.goto("about:blank")
     pause(0.3)
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    if not safe_goto(page, f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle"):
+        return False
     pause(1)
 
     if not open_list_selection_modal(page):
@@ -329,7 +361,8 @@ def add_film_to_list_via_modal(page, film_slug: str, list_name: str) -> bool:
     """Open list modal and check the checkbox for our list."""
     page.goto("about:blank")
     pause(0.3)
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    if not safe_goto(page, f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle"):
+        return False
     pause(1)
 
     if not open_list_selection_modal(page):
@@ -370,7 +403,8 @@ def add_film_to_list_via_modal(page, film_slug: str, list_name: str) -> bool:
 
 def film_is_on_mubi_tr(page, film_slug: str) -> bool:
     """Check the film detail page for the MUBI TR availability badge."""
-    page.goto(f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle")
+    if not safe_goto(page, f"{BASE_URL}/film/{film_slug}/", timeout=60_000, wait_until="networkidle"):
+        return False
     pause(0.8)
 
     watch_panel = page.locator("section.watch-panel.js-watch-panel").first
@@ -483,7 +517,8 @@ def search_film_slug(page, display_title: str, year: str, original_title: str) -
         url = f"{BASE_URL}/search/{quote(query)}/"
         page.goto("about:blank")
         pause(0.3)
-        page.goto(url, timeout=60_000, wait_until="networkidle")
+        if not safe_goto(page, url, timeout=60_000, wait_until="networkidle"):
+            continue
         pause(1.0)
 
         results = page.locator("ul.results li")
@@ -561,7 +596,8 @@ def collect_list_film_slugs(page) -> tuple[list[str], dict[str, dict]]:
         next_href = next_page.get_attribute("href") or ""
         if not next_href:
             break
-        page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+        if not safe_goto(page, urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded"):
+            break
         pause(0.5)
 
     return slugs, slug_meta
@@ -601,7 +637,8 @@ def collect_current_page_film_slugs(page) -> tuple[list[str], dict[str, dict]]:
 def get_list_film_slugs(page, list_url: str) -> tuple[list[str], dict[str, dict]]:
     """Read all list films from the unfiltered list page."""
     print("\n[3/5] Reading current films in the Letterboxd list...")
-    page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+    if not safe_goto(page, list_url, timeout=60_000, wait_until="domcontentloaded"):
+        return [], {}
     pause(0.5)
     slugs, slug_meta = collect_list_film_slugs(page)
     print(f"  [ok] Found {len(slugs)} films in list ({len(slug_meta)} with metadata)")
@@ -613,7 +650,8 @@ def open_list_mubi_tr_filter(page, list_url: str) -> bool:
     service_url = f"{list_url.rstrip('/')}/not/on/mubi-tr/"
     print("\n[6/6] Filtering list to films not on MUBI TR...")
     try:
-        page.goto(service_url, timeout=60_000, wait_until="domcontentloaded")
+        if not safe_goto(page, service_url, timeout=60_000, wait_until="domcontentloaded"):
+            return False
         pause(1.0)
         current_url = page.url or ""
         if "/not/on/mubi-tr/" in current_url:
@@ -624,7 +662,8 @@ def open_list_mubi_tr_filter(page, list_url: str) -> bool:
         return False
 
     try:
-        page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+        if not safe_goto(page, list_url, timeout=60_000, wait_until="domcontentloaded"):
+            return False
         pause(0.5)
         exclusion_link = page.locator("a:has-text('Exclude matching films')").first
         mubi_link = page.locator("a[href*='/not/on/mubi-tr/'], a[href*='/on/mubi-tr/']").first
@@ -661,21 +700,30 @@ def sync_letterboxd() -> None:
     csv_movies = load_csv_movies(CSV_FILE)
 
     with sync_playwright() as playwright:
+        browser = None
+        context = None
         try:
             browser = playwright.chromium.connect_over_cdp(CDP_URL)
+            print(f"  [ok] Connected to Chrome via {CDP_URL}")
+            context = browser.contexts[0]
         except Exception as e:
             print(f"\n[!] Could not connect to Chrome at {CDP_URL}")
             print(f"    Error: {e}")
-            print()
-            print("    Launch Chrome first with:")
-            print('    pkill -x "Google Chrome" && sleep 2')
-            print('    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\')
-            print('      --remote-debugging-port=9222 \\')
-            print('      --user-data-dir="/Users/ardacildan/ChromeDebug" &')
-            raise SystemExit(1)
-
-        print(f"  [ok] Connected to Chrome")
-        context = browser.contexts[0]
+            print("    Falling back to launching a local Chrome instance...")
+            try:
+                profile_dir = Path("/tmp/letterboxd-playwright-profile")
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                context = playwright.chromium.launch_persistent_context(
+                    str(profile_dir),
+                    channel="chrome",
+                    headless=False,
+                    args=["--no-first-run", "--no-default-browser-check"],
+                )
+                print("  [ok] Launched local Chrome instance")
+            except Exception as launch_error:
+                print("    [!] Could not launch local Chrome")
+                print(f"        Error: {launch_error}")
+                raise SystemExit(1)
 
         # Use a fresh tab to avoid stale state (unsaved drafts, popups) from previous runs
         page = context.new_page()
@@ -791,7 +839,8 @@ def sync_letterboxd() -> None:
         removed_no_service = 0
         for cleanup_round in range(1, 3):
             print(f"\n[6/6] MUBI TR cleanup pass {cleanup_round}/2...")
-            page.goto(list_url, timeout=60_000, wait_until="domcontentloaded")
+            if not safe_goto(page, list_url, timeout=60_000, wait_until="domcontentloaded"):
+                break
             pause(0.5)
             if open_list_mubi_tr_filter(page, list_url):
                 page_index = 1
@@ -803,7 +852,8 @@ def sync_letterboxd() -> None:
                     if not current_slugs:
                         if not next_href:
                             break
-                        page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+                        if not safe_goto(page, urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded"):
+                            break
                         pause(0.5)
                         page_index += 1
                         continue
@@ -819,7 +869,8 @@ def sync_letterboxd() -> None:
 
                     if not next_href:
                         break
-                    page.goto(urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded")
+                    if not safe_goto(page, urljoin(BASE_URL, next_href), timeout=60_000, wait_until="domcontentloaded"):
+                        break
                     pause(0.7)
                     page_index += 1
             else:

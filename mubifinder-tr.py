@@ -1,13 +1,20 @@
 import csv
 import re
 import time
+from typing import Optional
+
 import requests
 from bs4 import BeautifulSoup
+
+from scraper_utils import build_requests_session, request_with_retries
 
 BASE_URL = "https://mubifinder.com/movies/country/tr/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 OUTPUT_FILE = "mubifinder_turkey_available.csv"
 DELAY_SECONDS = 1.2
+REQUEST_TIMEOUT_SECONDS = 20
+SESSION = build_requests_session(timeout=REQUEST_TIMEOUT_SECONDS)
+
 
 def fetch_page(page):
     if page == 1:
@@ -16,8 +23,7 @@ def fetch_page(page):
         url = BASE_URL + f"?availability=available&page={page}"
     print(f"  Fetching: {url}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
+        r = request_with_retries(SESSION, url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS, delay_seconds=0.5)
         return BeautifulSoup(r.content, "html.parser")
     except requests.RequestException as e:
         print(f"  [!] Error fetching page {page}: {e}")
@@ -71,31 +77,30 @@ def is_feature_film(title, original_title=""):
 def get_total_pages(soup):
     page_nums = []
 
-    # Look for pagination urls like ?page=N
     for a in soup.find_all("a", href=True):
         m = re.search(r"page=(\d+)", a["href"])
         if m:
             page_nums.append(int(m.group(1)))
 
-    # The page uses JS buttons like onclick="changePage(2, '...')"
     for button in soup.find_all("button", onclick=True):
         m = re.search(r"changePage\((\d+),", button["onclick"])
         if m:
             page_nums.append(int(m.group(1)))
 
-    # Fallback: scan all page-change calls in the raw HTML text
     if not page_nums:
         for m in re.finditer(r"changePage\((\d+),", soup.decode()):
             page_nums.append(int(m.group(1)))
 
-    return max(page_nums) if page_nums else 1
+    if not page_nums:
+        return 1
+
+    return max(page_nums)
 
 
 def fetch_soup(url):
     print(f"  Fetching: {url}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
+        r = request_with_retries(SESSION, url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS, delay_seconds=0.5)
         return BeautifulSoup(r.content, "html.parser")
     except requests.RequestException as e:
         print(f"  [!] Error fetching {url}: {e}")
